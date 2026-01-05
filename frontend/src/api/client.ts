@@ -2,7 +2,7 @@
 // NEXUS AI PLATFORM - API CLIENT
 // ===========================================
 
-const API_BASE = '/api';
+const API_BASE = (import.meta.env.VITE_API_URL || 'https://selfactual-api.azurewebsites.net') + '/api';
 
 interface APIResponse<T> {
   success: boolean;
