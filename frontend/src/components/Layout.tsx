@@ -7,13 +7,15 @@ import {
   Shield,
   Bot,
   Sparkles,
-  Activity
+  Activity,
+  Wallet
 } from 'lucide-react';
 import clsx from 'clsx';
 
 const navigation = [
   { name: 'Dashboard', href: '/dashboard', icon: LayoutDashboard },
   { name: 'AI Chat', href: '/chat', icon: MessageSquare },
+  { name: 'Transactions', href: '/transactions', icon: Wallet },
   { name: 'Insights', href: '/insights', icon: Lightbulb },
   { name: 'Agents', href: '/agents', icon: Bot },
   { name: 'Audit', href: '/audit', icon: Shield },

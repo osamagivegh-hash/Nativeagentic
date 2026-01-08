@@ -74,7 +74,7 @@ export class AIOrchestrator {
   ): Promise<OrchestratorResult> {
     const taskId = uuidv4();
     const taskLogger = createTaskLogger(taskId, user.id);
-    
+
     const state: OrchestratorState = {
       taskId,
       userId: user.id,
@@ -91,7 +91,7 @@ export class AIOrchestrator {
       // PHASE 1: Intent Understanding
       state.status = 'planning';
       state.intent = await this.parseIntent(userMessage, conversationHistory, user);
-      
+
       logAIDecision(taskId, {
         type: 'intent_parsing',
         input: userMessage,
@@ -106,7 +106,7 @@ export class AIOrchestrator {
 
       // PHASE 2: Task Planning
       state.plan = await this.createPlan(state.intent, user);
-      
+
       logAIDecision(taskId, {
         type: 'task_planning',
         input: state.intent,
@@ -127,12 +127,12 @@ export class AIOrchestrator {
       // PHASE 4: Validation
       state.status = 'validating';
       const validationResult = await this.validateResults(state.results, state.intent);
-      
+
       if (!validationResult.isValid && state.retryCount < orchestratorConfig.maxRetries) {
         state.retryCount++;
         taskLogger.warn({ attempt: state.retryCount }, 'Validation failed, retrying');
         // Re-execute failed steps
-        const failedSteps = state.plan.steps.filter(s => 
+        const failedSteps = state.plan.steps.filter(s =>
           state.results.find(r => r.stepId === s.id && r.status === 'failed')
         );
         const retryResults = await this.retrySteps(failedSteps, state, user);
@@ -168,7 +168,7 @@ export class AIOrchestrator {
     } catch (error) {
       state.status = 'failed';
       taskLogger.error({ error }, 'Task processing failed');
-      
+
       await this.auditService.logError({
         taskId,
         userId: user.id,
@@ -205,7 +205,15 @@ Analyze the user's message and extract:
 3. The confidence level of your understanding
 4. Whether clarification is needed
 
-Categories: financial_analysis, compliance_check, user_behavior, system_operations, strategy_recommendation, general_query`;
+CATEGORIES (choose the most appropriate one):
+- financial_analysis: ANY question about money, spending, revenue, expenses, transactions, budgets, costs, profits, financial data, or financial metrics
+- compliance_check: Questions about rules, regulations, policies, auditing, or compliance requirements
+- user_behavior: Questions about user activity, customer patterns, engagement, or user analytics
+- system_operations: Questions about system health, performance, infrastructure, or operational metrics
+- strategy_recommendation: Questions asking for recommendations, strategic advice, or decision support
+- general_query: ONLY use this for greetings, help requests, or truly unclassifiable queries
+
+IMPORTANT: If the user asks about spending, costs, revenue, transactions, or any financial topic, you MUST use financial_analysis category.`;
 
     const conversationContext = history.slice(-10).map(m => ({
       role: m.role as 'user' | 'assistant',
@@ -228,7 +236,10 @@ Categories: financial_analysis, compliance_check, user_behavior, system_operatio
       {
         type: 'object',
         properties: {
-          category: { type: 'string' },
+          category: {
+            type: 'string',
+            enum: ['financial_analysis', 'compliance_check', 'user_behavior', 'system_operations', 'strategy_recommendation', 'general_query']
+          },
           subcategory: { type: 'string' },
           entities: {
             type: 'array',
@@ -273,7 +284,7 @@ Categories: financial_analysis, compliance_check, user_behavior, system_operatio
   private async createPlan(intent: Intent, user: User): Promise<TaskPlan> {
     const complexity = this.assessComplexity(intent);
     const requiredAgents = this.determineRequiredAgents(intent);
-    
+
     const systemPrompt = `You are a task planner for an AI system.
 Given the user's intent, create a detailed execution plan.
 
@@ -288,7 +299,11 @@ Create a step-by-step plan that:
 2. Assigns each step to the appropriate agent
 3. Specifies which tools each step will use
 4. Identifies dependencies between steps
-5. Estimates timeout for each step`;
+5. Estimates timeout for each step
+
+CRITICAL INSTRUCTIONS:
+- You must ONLY use the agent names listed in "Available agents" above.
+- Do NOT invent new agent names (e.g. do not use "Query Agent" or "Categorizer").`;
 
     const planResult = await completeWithSchema<{
       steps: Array<{
@@ -303,7 +318,7 @@ Create a step-by-step plan that:
       riskFactors: Array<{ type: string; description: string; severity: number }>;
     }>(
       [
-        { role: 'user', content: `Plan execution for: ${intent.normalizedQuery}\n\nEntities: ${JSON.stringify(intent.entities)}` }
+        { role: 'user', content: `Plan execution for: ${intent.normalizedQuery} \n\nEntities: ${JSON.stringify(intent.entities)} ` }
       ],
       {
         type: 'object',
@@ -348,20 +363,29 @@ Create a step-by-step plan that:
       }
     );
 
-    const steps: TaskStep[] = planResult.steps.map((s, idx) => ({
-      id: uuidv4(),
-      order: idx + 1,
-      agentType: s.agentType as AgentType,
-      action: s.action,
-      toolCalls: s.toolCalls.map(tc => ({
-        toolName: tc.toolName,
-        purpose: tc.purpose,
-        estimatedParams: {}
-      })),
-      dependencies: s.dependencies || [],
-      canParallelize: s.canParallelize ?? false,
-      timeout: s.timeout || 10000
-    }));
+    const steps: TaskStep[] = planResult.steps.map((s, idx) => {
+      let agentType = this.normalizeAgentType(s.agentType) as AgentType;
+
+      // CRITICAL FIX: If normalized agent is not in the required list, use the first required agent
+      if (!requiredAgents.includes(agentType)) {
+        agentType = requiredAgents[0];
+      }
+
+      return {
+        id: uuidv4(),
+        order: idx + 1,
+        agentType,
+        action: s.action,
+        toolCalls: s.toolCalls.map(tc => ({
+          toolName: tc.toolName,
+          purpose: tc.purpose,
+          estimatedParams: {}
+        })),
+        dependencies: s.dependencies || [],
+        canParallelize: s.canParallelize ?? false,
+        timeout: s.timeout || 10000
+      };
+    });
 
     const riskAssessment = this.assessRisk(planResult.riskFactors || [], complexity, user);
 
@@ -382,7 +406,7 @@ Create a step-by-step plan that:
     const entityCount = intent.entities.length;
     const hasFinancial = intent.category.includes('financial');
     const hasCompliance = intent.category.includes('compliance');
-    
+
     if (hasCompliance && hasFinancial) return 'critical';
     if (entityCount > 5 || hasCompliance) return 'complex';
     if (entityCount > 2) return 'moderate';
@@ -390,6 +414,14 @@ Create a step-by-step plan that:
   }
 
   private determineRequiredAgents(intent: Intent): AgentType[] {
+    // Nuclear Option: Explicitly check raw input first
+    const financialTerms = ['spend', 'cost', 'revenue', 'budget', 'transaction', 'money', 'expense', 'profit', 'financial', 'margin', 'price'];
+    const rawInputLower = intent.rawInput.toLowerCase();
+
+    if (financialTerms.some(term => rawInputLower.includes(term))) {
+      return ['financial', 'strategy'];
+    }
+
     const mapping: Record<string, AgentType[]> = {
       financial_analysis: ['financial', 'strategy'],
       compliance_check: ['compliance', 'operations'],
@@ -402,19 +434,98 @@ Create a step-by-step plan that:
     return mapping[intent.category] || ['operations'];
   }
 
+  private normalizeAgentType(agentType: string): AgentType {
+    // Map common variations to the correct agent type
+    const typeMapping: Record<string, AgentType> = {
+      // User insight variations
+      'user': 'user_insight',
+      'user_behavior': 'user_insight',
+      'userinsight': 'user_insight',
+      'user-insight': 'user_insight',
+      'behavior': 'user_insight',
+      'insight': 'user_insight',
+      'customer': 'user_insight',
+      'customer_insight': 'user_insight',
+
+      // Financial variations
+      'finance': 'financial',
+      'money': 'financial',
+      'budget': 'financial',
+      'accounting': 'financial',
+      'analyst': 'financial',
+      'data analyst': 'financial',
+      'data_analyst': 'financial',
+      'dataanalyst': 'financial',
+      'spending': 'financial',
+      'revenue': 'financial',
+      'cost': 'financial',
+      'expense': 'financial',
+      'profit': 'financial',
+      'transaction': 'financial',
+
+      // Compliance variations
+      'rules': 'compliance',
+      'regulatory': 'compliance',
+      'policy': 'compliance',
+      'audit': 'compliance',
+      'legal': 'compliance',
+
+      // Operations variations
+      'ops': 'operations',
+      'system': 'operations',
+      'health': 'operations',
+      'general': 'operations',
+      'default': 'operations',
+      'query': 'operations',
+
+      // Strategy variations
+      'recommendation': 'strategy',
+      'strategic': 'strategy',
+      'planning': 'strategy',
+      'advisor': 'strategy'
+    };
+
+    const normalized = agentType.toLowerCase().trim();
+
+    // FIRST: Check if the type contains any of the known agent type names directly
+    const validTypes: AgentType[] = ['financial', 'compliance', 'user_insight', 'operations', 'strategy'];
+    for (const validType of validTypes) {
+      if (normalized.includes(validType)) {
+        return validType;
+      }
+    }
+
+    // SECOND: Check direct mapping
+    if (typeMapping[normalized]) {
+      return typeMapping[normalized];
+    }
+
+    // THIRD: Check if the input string INCLUDES any of the mapping keys
+    // Sort keys by length desc to match longest keywords first
+    const keys = Object.keys(typeMapping).sort((a, b) => b.length - a.length);
+    for (const key of keys) {
+      if (normalized.includes(key)) {
+        return typeMapping[key];
+      }
+    }
+
+    // Default to operations for unknown types
+    return 'operations';
+  }
+
   private assessRisk(
     factors: Array<{ type: string; description: string; severity: number }>,
     complexity: TaskComplexity,
     user: User
   ): RiskAssessment {
     const maxSeverity = Math.max(...factors.map(f => f.severity), 0);
-    
+
     let level: RiskAssessment['level'] = 'low';
     if (maxSeverity > 8 || complexity === 'critical') level = 'critical';
     else if (maxSeverity > 5 || complexity === 'complex') level = 'high';
     else if (maxSeverity > 3) level = 'medium';
 
-    const requiresApproval = level === 'critical' || 
+    const requiresApproval = level === 'critical' ||
       (level === 'high' && !user.permissions.includes('high_risk_operations'));
 
     return {
@@ -500,7 +611,7 @@ Create a step-by-step plan that:
     previousResults: AgentResult[]
   ): Promise<AgentResult> {
     const agent = this.agentRegistry.getAgent(step.agentType);
-    
+
     const context = {
       conversationHistory: [],
       relevantMemories: await this.memoryManager.getUserMemories(user.id, step.action, 3),
@@ -544,12 +655,12 @@ Create a step-by-step plan that:
     intent: Intent
   ): Promise<{ isValid: boolean; issues: string[] }> {
     const failedResults = results.filter(r => r.status === 'failed');
-    const lowConfidenceResults = results.filter(r => 
+    const lowConfidenceResults = results.filter(r =>
       r.confidence < orchestratorConfig.confidenceThreshold
     );
 
     const issues: string[] = [];
-    
+
     if (failedResults.length > 0) {
       issues.push(`${failedResults.length} steps failed to execute`);
     }
@@ -567,8 +678,8 @@ Create a step-by-step plan that:
       [{
         role: 'user',
         content: `Validate if these results satisfy the intent.
-Intent: ${intent.normalizedQuery}
-Results: ${JSON.stringify(results.map(r => ({ output: r.output, confidence: r.confidence })))}`
+      Intent: ${intent.normalizedQuery}
+    Results: ${JSON.stringify(results.map(r => ({ output: r.output, confidence: r.confidence })))} `
       }],
       {
         type: 'object',
@@ -603,14 +714,15 @@ Results: ${JSON.stringify(results.map(r => ({ output: r.output, confidence: r.co
       [{
         role: 'user',
         content: `Generate an explanation for this AI decision.
-Intent: ${state.intent?.normalizedQuery}
-Plan: ${JSON.stringify(state.plan?.steps.map(s => s.action))}
-Results: ${JSON.stringify(state.results.map(r => ({
-  agent: r.agentType,
-  output: r.output,
-  confidence: r.confidence,
-  reasoning: r.reasoning.conclusion
-})))}`
+      Intent: ${state.intent?.normalizedQuery}
+    Plan: ${JSON.stringify(state.plan?.steps.map(s => s.action))}
+    Results: ${JSON.stringify(state.results.map(r => ({
+          agent: r.agentType,
+          output: r.output,
+          confidence: r.confidence,
+          reasoning: r.reasoning.conclusion
+        })))
+          } `
       }],
       {
         type: 'object',
@@ -656,7 +768,7 @@ Results: ${JSON.stringify(state.results.map(r => ({
     return {
       taskId: state.taskId,
       status: 'awaiting_input',
-      response: `I need some clarification to help you better:\n\n${state.intent!.clarificationQuestions?.join('\n')}`,
+      response: `I need some clarification to help you better: \n\n${state.intent!.clarificationQuestions?.join('\n')} `,
       explanation: {
         summary: 'Requesting clarification',
         reasoning: 'The intent was not clear enough to proceed',
@@ -679,11 +791,11 @@ Results: ${JSON.stringify(state.results.map(r => ({
     return {
       taskId: state.taskId,
       status: 'awaiting_approval',
-      response: `This action requires approval due to: ${state.plan!.riskAssessment.factors.map(f => f.description).join(', ')}`,
+      response: `This action requires approval due to: ${state.plan!.riskAssessment.factors.map(f => f.description).join(', ')} `,
       plan: state.plan,
       explanation: {
         summary: 'Awaiting approval for high-risk operation',
-        reasoning: `Risk level: ${state.plan!.riskAssessment.level}`,
+        reasoning: `Risk level: ${state.plan!.riskAssessment.level} `,
         dataSources: [],
         confidence: 0.9,
         limitations: [],
@@ -701,11 +813,11 @@ Results: ${JSON.stringify(state.results.map(r => ({
 
   private buildErrorResponse(state: OrchestratorState, error: unknown): OrchestratorResult {
     const errorMessage = error instanceof Error ? error.message : 'Unknown error';
-    
+
     return {
       taskId: state.taskId,
       status: 'failed',
-      response: `I encountered an error while processing your request: ${errorMessage}`,
+      response: `I encountered an error while processing your request: ${errorMessage} `,
       error: errorMessage,
       explanation: {
         summary: 'Task failed due to error',
@@ -727,8 +839,9 @@ Results: ${JSON.stringify(state.results.map(r => ({
 
   private formatResponse(state: OrchestratorState): string {
     // Combine all agent outputs into a coherent response
+    // Include both 'success' and 'partial' results - partial still has useful data
     const outputs = state.results
-      .filter(r => r.status === 'success')
+      .filter(r => r.status === 'success' || r.status === 'partial')
       .map(r => r.output);
 
     if (outputs.length === 0) {
@@ -741,8 +854,8 @@ Results: ${JSON.stringify(state.results.map(r => ({
     }
 
     // For multiple outputs, combine intelligently
-    return outputs.map((o, i) => 
-      `**${state.results[i].agentType.toUpperCase()} Analysis:**\n${typeof o === 'string' ? o : JSON.stringify(o, null, 2)}`
+    return outputs.map((o, i) =>
+      `** ${state.results[i].agentType.toUpperCase()} Analysis:**\n${typeof o === 'string' ? o : JSON.stringify(o, null, 2)} `
     ).join('\n\n');
   }
 }

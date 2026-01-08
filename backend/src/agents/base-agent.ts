@@ -4,6 +4,7 @@
 // ===========================================
 
 import { v4 as uuidv4 } from 'uuid';
+import zodToJsonSchema from 'zod-to-json-schema';
 import { complete, LLMMessage, LLMTool, parseToolArguments } from '../ai/llm-provider.js';
 import { ToolRegistry } from '../tools/registry.js';
 import { createAgentLogger } from '../utils/logger.js';
@@ -61,7 +62,7 @@ export abstract class BaseAgent {
 
       // Get available tools
       const tools = this.buildToolDefinitions(input.constraints.allowedTools);
-      
+
       let iterations = 0;
       const maxIterations = input.constraints.maxToolCalls;
       let finalOutput: JSONValue = null;
@@ -73,21 +74,22 @@ export abstract class BaseAgent {
         const response = await complete({
           messages,
           tools: tools.length > 0 ? tools : undefined,
-          temperature: 0.7,
+          toolChoice: tools.length > 0 ? 'auto' : undefined,
+          temperature: 0.3, // Lower temperature for more reliable tool calling
           maxTokens: 2048
         });
 
         // If no tool calls, we have our final answer
         if (response.toolCalls.length === 0) {
           finalOutput = this.parseOutput(response.content || '');
-          
+
           reasoningSteps.push({
             thought: 'Reached final conclusion',
             action: 'generate_response',
             observation: response.content || '',
             confidence: this.calculateConfidence(reasoningSteps, toolExecutions)
           });
-          
+
           break;
         }
 
@@ -111,8 +113,8 @@ export abstract class BaseAgent {
           toolExecutions.push(toolExecution);
 
           // Update the reasoning step with observation
-          reasoningSteps[reasoningSteps.length - 1].observation = 
-            toolExecution.result.success 
+          reasoningSteps[reasoningSteps.length - 1].observation =
+            toolExecution.result.success
               ? JSON.stringify(toolExecution.result.data).slice(0, 500)
               : `Error: ${toolExecution.result.error}`;
 
@@ -133,10 +135,10 @@ export abstract class BaseAgent {
       const duration = Date.now() - startTime;
       const confidence = this.calculateConfidence(reasoningSteps, toolExecutions);
 
-      logger.info({ 
-        duration, 
-        confidence, 
-        toolsUsed: toolExecutions.length 
+      logger.info({
+        duration,
+        confidence,
+        toolsUsed: toolExecutions.length
       }, 'Agent execution completed');
 
       return {
@@ -203,14 +205,24 @@ CONSTRAINTS:
 ${input.constraints.forbiddenActions.length > 0 ? `- Forbidden actions: ${input.constraints.forbiddenActions.join(', ')}` : ''}
 ${input.constraints.requireExplanation ? '- You MUST explain your reasoning for each decision' : ''}
 
+CRITICAL INSTRUCTIONS FOR TOOL USAGE:
+1. You MUST use the provided tools to gather real data before answering any question
+2. DO NOT describe what you would do - actually call the tools
+3. DO NOT make up or estimate data - query the database using tools
+4. If you need financial data, call query_financial_data first
+5. If you need metrics, call query_metrics first
+6. Always call at least one tool before providing your final answer
+7. Base your response ONLY on data returned from tool calls
+
 REASONING APPROACH:
 1. Analyze the task and identify what information you need
-2. Use tools to gather data and perform operations
-3. Synthesize findings into actionable insights
-4. Provide confidence scores for your conclusions
+2. IMMEDIATELY call the appropriate tools to gather real data
+3. Wait for tool results before forming conclusions
+4. Synthesize the actual data from tools into actionable insights
+5. Provide confidence scores based on the quality of data retrieved
 
 RESPONSE FORMAT:
-Provide structured, clear responses. When uncertain, explicitly state your confidence level and limitations.`;
+Provide structured, clear responses based on actual data from tools. Include specific numbers and facts from your tool calls.`;
 
     return basePrompt;
   }
@@ -227,7 +239,7 @@ Provide structured, clear responses. When uncertain, explicitly state your confi
     }
 
     if (input.context.previousResults.length > 0) {
-      prompt += `PREVIOUS AGENT RESULTS:\n${input.context.previousResults.map(r => 
+      prompt += `PREVIOUS AGENT RESULTS:\n${input.context.previousResults.map(r =>
         `- ${r.agentType}: ${JSON.stringify(r.output).slice(0, 200)}`
       ).join('\n')}\n\n`;
     }
@@ -242,7 +254,7 @@ Provide structured, clear responses. When uncertain, explicitly state your confi
   // ===========================================
 
   protected buildToolDefinitions(allowedTools: string[]): LLMTool[] {
-    const tools = allowedTools.length > 0 
+    const tools = allowedTools.length > 0
       ? allowedTools.filter(t => this.config.tools.includes(t))
       : this.config.tools;
 
@@ -250,12 +262,22 @@ Provide structured, clear responses. When uncertain, explicitly state your confi
       const tool = this.toolRegistry.getTool(toolName);
       if (!tool) return null;
 
+      // Convert Zod schema to JSON Schema for OpenAI
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const jsonSchema = zodToJsonSchema(tool.inputSchema as any, {
+        $refStrategy: 'none',
+        target: 'openApi3'
+      }) as JSONObject;
+
+      // Remove the $schema property as OpenAI doesn't need it
+      delete jsonSchema['$schema'];
+
       return {
         type: 'function' as const,
         function: {
           name: tool.name,
           description: tool.description,
-          parameters: tool.inputSchema as unknown as JSONObject
+          parameters: jsonSchema
         }
       };
     }).filter((t): t is LLMTool => t !== null);
@@ -267,7 +289,7 @@ Provide structured, clear responses. When uncertain, explicitly state your confi
     input: AgentInput
   ): Promise<ToolExecution> {
     const startTime = Date.now();
-    
+
     try {
       const result = await this.toolRegistry.executeTool(toolName, params, {
         userId: input.taskId, // In real implementation, pass actual userId
@@ -310,8 +332,8 @@ Provide structured, clear responses. When uncertain, explicitly state your confi
 
     // Adjust based on tool execution success rate
     const successfulTools = executions.filter(e => e.result.success).length;
-    const toolSuccessRate = executions.length > 0 
-      ? successfulTools / executions.length 
+    const toolSuccessRate = executions.length > 0
+      ? successfulTools / executions.length
       : 1;
 
     // Combine scores
@@ -330,15 +352,15 @@ Provide structured, clear responses. When uncertain, explicitly state your confi
   protected extractAlternatives(steps: ReasoningStep[]): string[] {
     // Extract any alternatives mentioned in thoughts
     return steps
-      .filter(s => s.thought.toLowerCase().includes('alternatively') || 
-                   s.thought.toLowerCase().includes('could also'))
+      .filter(s => s.thought.toLowerCase().includes('alternatively') ||
+        s.thought.toLowerCase().includes('could also'))
       .map(s => s.thought);
   }
 
   protected extractAssumptions(steps: ReasoningStep[]): string[] {
     return steps
       .filter(s => s.thought.toLowerCase().includes('assuming') ||
-                   s.thought.toLowerCase().includes('given that'))
+        s.thought.toLowerCase().includes('given that'))
       .map(s => s.thought);
   }
 

@@ -5,6 +5,7 @@ import { Chat } from './pages/Chat';
 import { Insights } from './pages/Insights';
 import { Audit } from './pages/Audit';
 import { Agents } from './pages/Agents';
+import { Transactions } from './pages/Transactions';
 
 function App() {
   return (
@@ -17,6 +18,7 @@ function App() {
           <Route path="/insights" element={<Insights />} />
           <Route path="/audit" element={<Audit />} />
           <Route path="/agents" element={<Agents />} />
+          <Route path="/transactions" element={<Transactions />} />
         </Route>
       </Routes>
     </BrowserRouter>

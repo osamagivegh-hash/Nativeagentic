@@ -4,6 +4,7 @@
 // ===========================================
 
 import 'dotenv/config';
+import { v4 as uuidv4, validate as uuidValidate } from 'uuid';
 import Fastify from 'fastify';
 import cors from '@fastify/cors';
 import helmet from '@fastify/helmet';
@@ -96,7 +97,7 @@ async function setupMiddleware(): Promise<void> {
     // For demo purposes, create a mock user
     // In production, verify JWT token
     const mockUser: User = {
-      id: 'user-001',
+      id: '00000000-0000-0000-0000-000000000001', // Valid UUID format for demo
       email: 'demo@nexus.ai',
       name: 'Demo User',
       role: 'analyst' as UserRole,
@@ -113,7 +114,8 @@ async function setupMiddleware(): Promise<void> {
         'generate_reports',
         'manage_alerts',
         'execute_operations',
-        'read_system_health'
+        'read_system_health',
+        'high_risk_operations'
       ],
       preferences: {
         timezone: 'UTC',
@@ -127,7 +129,14 @@ async function setupMiddleware(): Promise<void> {
     };
 
     (request as any).user = mockUser;
-    (request as any).sessionId = request.headers['x-session-id'] || `session-${Date.now()}`;
+    (request as any).user = mockUser;
+
+    const incomingSessionId = request.headers['x-session-id'] as string;
+    if (incomingSessionId && uuidValidate(incomingSessionId)) {
+      (request as any).sessionId = incomingSessionId;
+    } else {
+      (request as any).sessionId = uuidv4();
+    }
   });
 }
 
